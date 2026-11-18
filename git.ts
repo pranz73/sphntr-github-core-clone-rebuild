@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { Forge, Repository, ZERO_OID, parseCommit, parseTag, reachableObjects, isAncestor } from './store.ts';
+import { Forge, Repository, ZERO_OID, parseCommit, parseTag, parseTree, isAncestor } from './store.ts';
 import { decodePackets, framePacket, flushPacket, writePack, readPack, sideband } from './pack.ts';
 
 const agent = 'agent=makefun-git/1.0';
@@ -21,18 +21,20 @@ export async function handleInfoRefs(forge:Forge,req:IncomingMessage,res:ServerR
 }
 function bodyBytes(body:unknown):Buffer { if(Buffer.isBuffer(body))return body;if(body instanceof Uint8Array)return Buffer.from(body);return Buffer.alloc(0); }
 function packetLines(body:Buffer){return decodePackets(body);}
-function reachableCommits(repo:Repository,roots:string[]):Set<string>{const seen=new Set<string>(),todo=[...roots];while(todo.length){const id=todo.pop()!;if(seen.has(id))continue;const o=repo.getObject(id);if(!o||o.type!=='commit')continue;seen.add(id);todo.push(...parseCommit(o.data).parents);}return seen;}
+function reachableCommits(repo:Repository,roots:string[],shallow:string[]=[]):Set<string>{const seen=new Set<string>(),shallowSet=new Set(shallow),todo=[...roots];while(todo.length){const id=todo.pop()!;if(seen.has(id))continue;const o=repo.getObject(id);if(!o||o.type!=='commit')continue;seen.add(id);if(!shallowSet.has(id))todo.push(...parseCommit(o.data).parents);}return seen;}
+function reachableHaveObjects(repo:Repository,roots:string[],shallow:string[]):Set<string>{const seen=new Set<string>(),shallowSet=new Set(shallow),todo=[...roots];while(todo.length){const id=todo.pop()!;if(seen.has(id))continue;const o=repo.getObject(id);if(!o)continue;seen.add(id);if(o.type==='commit'){const c=parseCommit(o.data);todo.push(c.tree);if(!shallowSet.has(id))todo.push(...c.parents);}else if(o.type==='tree'){for(const e of parseTree(o.data))todo.push(e.oid);}else if(o.type==='tag')todo.push(parseTag(o.data).object);}return seen;}
 function packObjects(repo:Repository,ids:Set<string>):Buffer{return writePack([...ids].map(id=>repo.getObject(id)).filter((x):x is NonNullable<typeof x>=>!!x));}
 function appendPackSideband(out:Buffer[],pack:Buffer){out.push(sideband(pack,1));}
 function fetchResult(repo:Repository,wants:string[],haves:string[],depth?:number,clientShallow:string[]=[]):{pack:Buffer;shallow:string[];unshallow:string[]}{
- const haveCommits=reachableCommits(repo,haves), haveObjects=reachableObjects(repo,haves), distances=new Map<string,number>(), queue=wants.map(id=>[id,0] as [string,number]), boundary=new Set<string>(), unshallow=new Set<string>(), shallowSet=new Set(clientShallow), tagObjects=new Set<string>();
+ const haveCommits=reachableCommits(repo,haves,clientShallow), haveObjects=reachableHaveObjects(repo,haves,clientShallow), distances=new Map<string,number>(), queue=wants.map(id=>[id,0] as [string,number]), boundary=new Set<string>(), unshallow=new Set<string>(), shallowSet=new Set(clientShallow), tagObjects=new Set<string>();
  for(const root of wants){let id=root;while(repo.getObject(id)?.type==='tag'&&!tagObjects.has(id)){tagObjects.add(id);id=parseTag(repo.getObject(id)!.data).object;}if(repo.getObject(id)?.type==='commit'&&!wants.includes(id))queue.push([id,0]);}
- while(queue.length){const [id,generation]=queue.shift()!;if(haveCommits.has(id)||(distances.get(id)??Infinity)<=generation)continue;const obj=repo.getObject(id);if(!obj||obj.type!=='commit')continue;distances.set(id,generation);const parents=parseCommit(obj.data).parents;
-  if(depth!==undefined&&generation>=depth){if(parents.some(p=>repo.getObject(p)))boundary.add(id);continue;}
-  if(shallowSet.has(id)){if(depth===undefined||parents.length===0){boundary.add(id);continue;}unshallow.add(id);}
+ while(queue.length){const [id,generation]=queue.shift()!;if(haveCommits.has(id)&&!(depth!==undefined&&(wants.includes(id)||shallowSet.has(id)))||(distances.get(id)??Infinity)<=generation)continue;if(depth!==undefined&&generation>=depth)continue;const obj=repo.getObject(id);if(!obj||obj.type!=='commit')continue;distances.set(id,generation);const parents=parseCommit(obj.data).parents;
+  if(depth!==undefined&&generation+1>=depth&&parents.some(p=>repo.getObject(p)))boundary.add(id);
+  if(shallowSet.has(id)){if(depth===undefined||generation+1>=depth||parents.length===0){boundary.add(id);continue;}unshallow.add(id);}
+  if(depth!==undefined&&generation+1>=depth)continue;
   queue.push(...parents.map(parent=>[parent,generation+1] as [string,number]));
  }
- const commits=new Set(distances.keys()),include=new Set<string>();for(const id of tagObjects)if(!haveObjects.has(id))include.add(id);for(const id of commits){if(!haveObjects.has(id))include.add(id);const o=repo.getObject(id);if(o?.type==='commit')for(const x of reachableObjects(repo,[parseCommit(o.data).tree]))if(!haveObjects.has(x))include.add(x);}
+ const commits=new Set(distances.keys()),include=new Set<string>();for(const id of tagObjects)if(!haveObjects.has(id))include.add(id);for(const id of commits){if(!haveObjects.has(id))include.add(id);const o=repo.getObject(id);if(o?.type==='commit')for(const x of reachableHaveObjects(repo,[parseCommit(o.data).tree],[]))if(!haveObjects.has(x))include.add(x);}
  return{pack:packObjects(repo,include),shallow:[...boundary].filter(id=>!shallowSet.has(id)),unshallow:[...unshallow],};
 }
 export async function handleUploadPack(forge:Forge,req:IncomingMessage,res:ServerResponse,owner:string,repoName:string,body?:Uint8Array):Promise<void>{
