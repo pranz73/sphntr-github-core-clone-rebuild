@@ -3,6 +3,7 @@ import { createForgeFromEnv, type Forge } from './store.ts';
 import { handleInfoRefs, handleUploadPack, handleReceivePack } from './git.ts';
 import { routeRest as dispatchRest } from './rest.ts';
 import { executeGraphQL } from './graphql.ts';
+import { handleMcp } from './mcp.ts';
 
 function sendJson(forge:Forge,res:ServerResponse,status:number,value:unknown,requestId=true):void {res.statusCode=status;res.setHeader('Content-Type','application/json; charset=utf-8');if(requestId)res.setHeader('X-GitHub-Request-Id',forge.nextRequestId());res.end(JSON.stringify(value));}
 async function readBody(req:IncomingMessage):Promise<Buffer>{const chunks:Buffer[]=[];let size=0;for await(const chunk of req){const b=Buffer.from(chunk);size+=b.length;if(size>64*1024*1024)throw Object.assign(new Error('Request body too large'),{status:413});chunks.push(b);}return Buffer.concat(chunks,size);}
@@ -12,6 +13,14 @@ export function createApp(env:Record<string,string|undefined>=process.env):Serve
   try{
    const url=new URL(req.url??'/',`http://${req.headers.host??'localhost'}`),path=url.pathname;
    if(req.method==='GET'&&path==='/healthz'){sendJson(forge,res,200,{ok:true});return;}
+   if(path==='/mcp'){
+    if(req.method==='DELETE'){res.statusCode=200;res.end();return;}
+    if(req.method==='GET'){sendJson(forge,res,405,{message:'Method Not Allowed'});return;}
+    if(req.method==='POST'){
+     if(req.headers.authorization!==`Bearer ${env.MAKEFUN_SHOP_TOKEN??''}`){sendJson(forge,res,401,{message:'Requires authentication'});return;}
+     const raw=await readBody(req),reply=handleMcp(forge,raw.toString('utf8'));res.statusCode=reply.status;if(reply.payload===null){res.end();return;}res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(reply.payload));return;
+    }
+   }
    if(path==='/api/v3'||path==='/api/v3/'){if(req.method==='GET'){res.setHeader('X-Oauth-Scopes','repo, read:org');sendJson(forge,res,200,{current_user_url:'/api/v3/user',meta:'/api/v3/meta',version:'1'});return;}}
    if(path==='/api/v3'||path.startsWith('/api/v3/')){if(req.headers.authorization!==`Bearer ${env.MAKEFUN_SHOP_TOKEN??''}`){sendJson(forge,res,401,{message:'Requires authentication'});return;}const rawPath=path.slice('/api/v3'.length).split('/').filter(Boolean),segments:string[]=[];for(const segment of rawPath){const decoded=decodeSegment(segment);if(decoded===undefined){sendJson(forge,res,404,{message:'Not Found'});return;}segments.push(decoded);}let body:any,malformedJson=false;if(['POST','PATCH','PUT','DELETE'].includes(req.method??'')){const raw=await readBody(req);if(raw.length){try{body=JSON.parse(raw.toString('utf8'));}catch{malformedJson=true;}}}const reply=dispatchRest(forge,{method:req.method??'GET',segments,query:url.searchParams,body,malformedJson,authenticated:true,baseUrl:`${req.socket.encrypted?'https':'http'}://${req.headers.host??'localhost'}`});res.statusCode=reply.status;res.setHeader('X-GitHub-Request-Id',forge.nextRequestId());if(reply.headers)for(const [k,v] of Object.entries(reply.headers))res.setHeader(k,v);if(reply.body===undefined){res.end();return;}res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(reply.body));return;}
    if(path==='/api/graphql'&&req.method==='POST'){if(req.headers.authorization!==`Bearer ${env.MAKEFUN_SHOP_TOKEN??''}`){sendJson(forge,res,401,{message:'Requires authentication'});return;}const raw=await readBody(req);let payload:any;try{payload=JSON.parse(raw.toString('utf8'));}catch{sendJson(forge,res,400,{message:'Problems parsing JSON'});return;}sendJson(forge,res,200,executeGraphQL(forge,payload));return;}
