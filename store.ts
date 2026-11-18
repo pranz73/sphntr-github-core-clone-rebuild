@@ -92,7 +92,7 @@ export class Repository {
   readonly objects = new Map<ObjectId, GitObject>(); readonly refs = new Map<string, ObjectId>(); readonly labels = new Map<string, string>();
   readonly issues = new Map<number, Issue>(); readonly pulls = new Map<number, PullRequest>();
   private sequence = 1;
-  readonly name: string; readonly privateRepo: boolean; description: string; readonly id: number;
+  name: string; privateRepo: boolean; description: string; readonly id: number;
   constructor(name: string, privateRepo: boolean, description: string, id: number) { this.name = name; this.privateRepo = privateRepo; this.description = description; this.id = id; }
   /** Stores an object and returns its id. */
   putObject(type: GitObjectType, data: Uint8Array | string): ObjectId { const bytes = typeof data === 'string' ? Buffer.from(data) : Buffer.from(data); const oid = hashObject(type, bytes); this.objects.set(oid, { type, data: bytes }); return oid; }
